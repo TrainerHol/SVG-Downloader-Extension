@@ -152,21 +152,24 @@ function init() {
   captureRegularSVGs();
   captureCanvasSVGs();
   captureBlobSVGs();
-
-  // Listen for messages from popup
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "getSVGs") {
-      // Since blob processing is asynchronous, wait a short time before responding
-      setTimeout(() => {
-        sendResponse({ svgs: svgData });
-      }, 100);
-      return true; // Required for async response
-    } else if (request.action === "downloadAllAsZip") {
-      downloadAllAsZip();
-      return true;
-    }
-  });
 }
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "getSVGs") {
+    // Refresh SVG data before responding
+    init();
+    // Since blob processing is asynchronous, wait a short time before responding
+    setTimeout(() => {
+      sendResponse({ svgs: svgData });
+    }, 100);
+    return true; // Required for async response
+  } else if (request.action === "downloadAllAsZip") {
+    // Refresh SVG data before downloading
+    init();
+    downloadAllAsZip();
+    return true;
+  }
+});
 
 // Initialize canvas operation interception
 interceptCanvasOperations();
@@ -174,7 +177,7 @@ interceptCanvasOperations();
 // Initialize when the page loads
 init();
 
-// Watch for dynamic changes
+// Watch for dynamic changes, but only update the SVG data
 const observer = new MutationObserver(() => {
   init();
 });
