@@ -128,14 +128,17 @@ function captureBlobSVGs() {
 
       if (blob.type === "image/svg+xml") {
         const text = await blob.text();
+        const width = img.width || 0;
+        const height = img.height || 0;
+
         svgData.push({
           id: generateFileName(img, "blob", index),
           type: "blob",
           source: img.src,
           rawSvg: text,
           dimensions: {
-            width: img.width,
-            height: img.height,
+            width: width,
+            height: height,
           },
           location: `Image in ${img.closest("[id]")?.id || "unknown"} element`,
         });
@@ -154,22 +157,38 @@ function init() {
   captureBlobSVGs();
 }
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "getSVGs") {
-    // Refresh SVG data before responding
-    init();
-    // Since blob processing is asynchronous, wait a short time before responding
-    setTimeout(() => {
-      sendResponse({ svgs: svgData });
-    }, 100);
-    return true; // Required for async response
-  } else if (request.action === "downloadAllAsZip") {
-    // Refresh SVG data before downloading
-    init();
-    downloadAllAsZip();
-    return true;
-  }
-});
+// Wrap message listener in a check for chrome.runtime
+if (typeof chrome !== "undefined" && chrome.runtime) {
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "getSVGs") {
+      // Refresh SVG data before responding
+      init();
+
+      // Use Promise.all to wait for all blob SVGs to be processed
+      Promise.all(
+        Array.from(document.querySelectorAll('img[src^="blob:"]')).map(async (img) => {
+          try {
+            const response = await fetch(img.src);
+            return response.blob();
+          } catch (e) {
+            return null;
+          }
+        })
+      ).then(() => {
+        setTimeout(() => {
+          sendResponse({ svgs: svgData });
+        }, 100);
+      });
+
+      return true;
+    } else if (request.action === "downloadAllAsZip") {
+      // Refresh SVG data before downloading
+      init();
+      downloadAllAsZip();
+      return false; // No async response needed for download
+    }
+  });
+}
 
 // Initialize canvas operation interception
 interceptCanvasOperations();
@@ -191,44 +210,43 @@ observer.observe(document.body, {
 
 async function downloadAllAsZip() {
   const zip = new JSZip();
-
-  // Create a folder for the SVGs
   const svgFolder = zip.folder("svgs");
 
-  svgData.forEach((svg, index) => {
-    let content, filename;
+  // Wait for all SVGs to be processed
+  await Promise.all(
+    svgData.map(async (svg) => {
+      let content;
 
-    // Get content based on SVG type
-    if (svg.rawSvg) {
-      content = svg.rawSvg;
-    } else if (svg.source.startsWith("data:image/svg+xml,")) {
-      content = decodeURIComponent(svg.source.split("data:image/svg+xml,")[1]);
-    } else if (svg.source.startsWith("data:image/svg+xml;base64,")) {
-      content = atob(svg.source.split(",")[1]);
-    } else {
-      content = svg.source;
-    }
+      try {
+        if (svg.rawSvg) {
+          content = svg.rawSvg;
+        } else if (svg.source.startsWith("data:image/svg+xml,")) {
+          content = decodeURIComponent(svg.source.split("data:image/svg+xml,")[1]);
+        } else if (svg.source.startsWith("data:image/svg+xml;base64,")) {
+          content = atob(svg.source.split(",")[1]);
+        } else if (svg.source.startsWith("blob:")) {
+          const response = await fetch(svg.source);
+          content = await response.text();
+        } else {
+          content = svg.source;
+        }
 
-    // Generate filename
-    filename = `${svg.id}.svg`;
-
-    // Add to zip if we have content
-    if (content) {
-      svgFolder.file(filename, content);
-    }
-  });
+        if (content) {
+          svgFolder.file(`${svg.id}.svg`, content);
+        }
+      } catch (error) {
+        console.error(`Error processing SVG ${svg.id}:`, error);
+      }
+    })
+  );
 
   try {
-    // Generate zip with compression
     const blob = await zip.generateAsync({
       type: "blob",
       compression: "DEFLATE",
-      compressionOptions: {
-        level: 9,
-      },
+      compressionOptions: { level: 9 },
     });
 
-    // Create download URL and trigger download
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
