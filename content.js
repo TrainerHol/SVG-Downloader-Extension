@@ -149,98 +149,104 @@ function captureBlobSVGs() {
   });
 }
 
-function init() {
-  svgData = [];
-  captureUrlEncodedSVGs();
-  captureRegularSVGs();
-  captureCanvasSVGs();
-  captureBlobSVGs();
-}
+// Wrap the initialization and message handling in an IIFE (Immediately Invoked Function Expression)
+(function () {
+  // Initialize canvas operation interception
+  interceptCanvasOperations();
 
-// Wrap message listener in a check for chrome.runtime
-if (typeof chrome !== "undefined" && chrome.runtime) {
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "getSVGs") {
-      // Refresh SVG data before responding
-      init();
+  // Initialize SVG capture
+  function init() {
+    svgData = [];
+    captureUrlEncodedSVGs();
+    captureRegularSVGs();
+    captureCanvasSVGs();
+    captureBlobSVGs();
+  }
 
-      // Use Promise.all to wait for all blob SVGs to be processed
-      Promise.all(
-        Array.from(document.querySelectorAll('img[src^="blob:"]')).map(async (img) => {
-          try {
-            const response = await fetch(img.src);
-            return response.blob();
-          } catch (e) {
-            return null;
-          }
-        })
-      ).then(() => {
-        setTimeout(() => {
-          sendResponse({ svgs: svgData });
-        }, 100);
-      });
-
-      return true;
-    } else if (request.action === "downloadAllAsZip") {
-      // Refresh SVG data before downloading
-      init();
-      downloadAllAsZip();
-      return false; // No async response needed for download
-    }
-  });
-}
-
-// Initialize canvas operation interception
-interceptCanvasOperations();
-
-// Initialize when the page loads
-init();
-
-// Watch for dynamic changes, but only update the SVG data
-const observer = new MutationObserver(() => {
+  // Initial capture
   init();
-});
 
-observer.observe(document.body, {
-  childList: true,
-  subtree: true,
-  attributes: true,
-  attributeFilter: ["src", "style"],
-});
+  // Set up mutation observer
+  const observer = new MutationObserver(() => {
+    init();
+  });
+
+  // Start observing
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["src", "style"],
+  });
+
+  // Set up message handling
+  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      if (request.action === "getSVGs") {
+        // Refresh SVG data
+        init();
+
+        // Handle async blob processing
+        const blobPromises = Array.from(document.querySelectorAll('img[src^="blob:"]')).map((img) =>
+          fetch(img.src)
+            .then((response) => response.blob())
+            .catch(() => null)
+        );
+
+        Promise.all(blobPromises)
+          .then(() => {
+            sendResponse({ svgs: svgData });
+          })
+          .catch((error) => {
+            console.error("Error processing blobs:", error);
+            sendResponse({ svgs: svgData });
+          });
+
+        return true; // Keep the message channel open for async response
+      }
+
+      if (request.action === "downloadAllAsZip") {
+        init();
+        downloadAllAsZip().catch(console.error);
+        return false; // No async response needed
+      }
+    });
+  }
+})();
 
 async function downloadAllAsZip() {
-  const zip = new JSZip();
-  const svgFolder = zip.folder("svgs");
-
-  // Wait for all SVGs to be processed
-  await Promise.all(
-    svgData.map(async (svg) => {
-      let content;
-
-      try {
-        if (svg.rawSvg) {
-          content = svg.rawSvg;
-        } else if (svg.source.startsWith("data:image/svg+xml,")) {
-          content = decodeURIComponent(svg.source.split("data:image/svg+xml,")[1]);
-        } else if (svg.source.startsWith("data:image/svg+xml;base64,")) {
-          content = atob(svg.source.split(",")[1]);
-        } else if (svg.source.startsWith("blob:")) {
-          const response = await fetch(svg.source);
-          content = await response.text();
-        } else {
-          content = svg.source;
-        }
-
-        if (content) {
-          svgFolder.file(`${svg.id}.svg`, content);
-        }
-      } catch (error) {
-        console.error(`Error processing SVG ${svg.id}:`, error);
-      }
-    })
-  );
-
   try {
+    const zip = new JSZip();
+    const svgFolder = zip.folder("svgs");
+
+    // Process all SVGs
+    await Promise.all(
+      svgData.map(async (svg) => {
+        try {
+          let content;
+          if (svg.rawSvg) {
+            content = svg.rawSvg;
+          } else if (svg.source.startsWith("data:image/svg+xml,")) {
+            content = decodeURIComponent(svg.source.split("data:image/svg+xml,")[1]);
+          } else if (svg.source.startsWith("data:image/svg+xml;base64,")) {
+            content = atob(svg.source.split(",")[1]);
+          } else if (svg.source.startsWith("blob:")) {
+            const response = await fetch(svg.source);
+            content = await response.text();
+          } else {
+            content = svg.source;
+          }
+
+          if (content) {
+            svgFolder.file(`${svg.id}.svg`, content);
+          }
+        } catch (error) {
+          console.error(`Error processing SVG ${svg.id}:`, error);
+        }
+      })
+    );
+
+    // Generate and download the zip
     const blob = await zip.generateAsync({
       type: "blob",
       compression: "DEFLATE",
@@ -257,5 +263,6 @@ async function downloadAllAsZip() {
     URL.revokeObjectURL(url);
   } catch (error) {
     console.error("Error creating zip:", error);
+    throw error; // Re-throw to be caught by the caller
   }
 }
